@@ -1,5 +1,6 @@
 #include "CMT.h"
 #include "gui.h"
+#include "parse_dataset.h"
 
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
@@ -64,14 +65,14 @@ int display(Mat im, CMT & cmt)
     //It is ok to draw on im itself, as CMT only uses the grayscale image
     for(size_t i = 0; i < cmt.points_active.size(); i++)
     {
-        circle(im, cmt.points_active[i], 2, Scalar(255,0,0));
+        circle(im, cmt.points_active[i], 2, Scalar(0,0,255));
     }
 
     Point2f vertices[4];
     cmt.bb_rot.points(vertices);
     for (int i = 0; i < 4; i++)
     {
-        line(im, vertices[i], vertices[(i+1)%4], Scalar(255,0,0));
+        line(im, vertices[i], vertices[(i+1)%4], Scalar(0,0,255));
     }
 
     imshow(WIN_NAME, im);
@@ -98,6 +99,8 @@ string write_rotated_rect(RotatedRect rect)
     return coords.str();
 }
 
+#if 0
+
 int main(int argc, char **argv)
 {
     //Create a CMT object
@@ -107,9 +110,9 @@ int main(int argc, char **argv)
     Rect rect;
 
     //Parse args
-    int challenge_flag = 0;
+    int challenge_flag = 1;
     int loop_flag = 0;
-    int verbose_flag = 0;
+    int verbose_flag = 1;
     int bbox_flag = 0;
     int skip_frames = 0;
     int skip_msecs = 0;
@@ -245,7 +248,7 @@ int main(int argc, char **argv)
         }
 
         //Read region
-        ifstream region_file("region.txt");
+        ifstream region_file("groundtruth_rect.txt");
         vector<float> coords = getNextLineAndSplitIntoFloats(region_file);
 
         if (coords.size() == 4) {
@@ -456,3 +459,130 @@ int main(int argc, char **argv)
 
     return 0;
 }
+
+#else
+
+
+int main(int argc, char* argv[])
+{
+    //Create a CMT object
+    CMT cmt;
+    cmt.str_detector = "SURF";
+
+    //Initialization bounding box
+    Rect rect;
+
+    //Parse args
+    int challenge_flag = 1;
+    int loop_flag = 0;
+    int verbose_flag = 1;
+    int bbox_flag = 0;
+    int skip_frames = 0;
+    int skip_msecs = 0;
+    int output_flag = 0;
+    string input_path;
+    string output_path;
+    ParseDatasetFactory parse_dataset_factory;
+
+    if (argc != 3) {
+        printf("usage: %s dataset_path %s\n", argv[0], parse_dataset_factory.support_dataset().c_str());
+        return -1;
+    }
+
+    std::string dataset_path = argv[1];
+    std::string dataset_type = argv[2];
+
+
+    //Set up logging
+    FILELog::ReportingLevel() = logINFO;//verbose_flag ? logDEBUG : logINFO;
+    Output2FILE::Stream() = stdout; //Log to stdout
+
+
+
+    ParseDataset* parse_dataset = parse_dataset_factory.create_parse_dataset(dataset_path, dataset_type);
+    if (parse_dataset == NULL) {
+        printf("Don't support dataset:%s, please try %s\n", dataset_type.c_str(), parse_dataset_factory.support_dataset().c_str());
+        return -1;
+    }
+ 
+    parse_dataset->parse();
+//    parse_dataset->debug_info();
+
+    cv::Rect init_rect = parse_dataset->get_bbox(0);
+    rect = init_rect;
+
+    //Read first image
+    Mat im0 = parse_dataset->read_image(0, 1);
+    Mat im0_gray;
+    cvtColor(im0, im0_gray, CV_BGR2GRAY);
+
+    //Initialize cmt
+    cmt.initialize(im0_gray, rect);
+
+    //Write init region to output file
+    ofstream output_file("output.txt");
+    output_file << rect.x << ',' << rect.y << ',' << rect.width << ',' << rect.height << std::endl;
+
+
+
+    int frame_count = 1;
+    while(1)
+    {
+        cv::Mat img = parse_dataset->read_image(frame_count, 1);
+        if (img.empty()) {
+            break;
+        }
+
+        Mat im = img;
+        Mat im_gray;
+        cvtColor(im, im_gray, CV_BGR2GRAY);
+        cmt.processFrame(im_gray);
+        if (verbose_flag)
+        {
+            display(im, cmt);
+        }
+        rect = cmt.bb_rot.boundingRect();
+        output_file << rect.x << ',' << rect.y << ',' << rect.width << ',' << rect.height << std::endl;
+
+        cv::Rect gd_bbox = parse_dataset->get_bbox(frame_count);
+
+        if (dataset_type == "vot2015") {
+            ParseDatasetVot2013* vot_dataset = (ParseDatasetVot2013*)parse_dataset;
+
+            std::vector<cv::Point2f> polygon = vot_dataset->get_polygon(frame_count);
+            cv::Point2f src_point[3];
+            cv::Point2f dst_point[3];
+            src_point[0] = polygon[0];
+            src_point[1] = polygon[1];
+            src_point[2] = polygon[2]; 
+            dst_point[0] = cv::Point2f(0, 0);
+            dst_point[1] = cv::Point2f(init_rect.width, 0);
+            dst_point[2] = cv::Point2f(init_rect.width, init_rect.height);
+            cv::Mat aff_map = cv::getAffineTransform(src_point, dst_point);
+            cv::Mat obj_img;
+            cv::warpAffine(img, obj_img, aff_map, cv::Size(init_rect.width, init_rect.height));
+            cv::imshow("obj_img", obj_img);
+
+            for (size_t i = 0; i < polygon.size(); i++)
+            {
+                cv::circle(img, polygon[i], 2, cv::Scalar(0,255,0));
+            }
+
+        }
+
+
+        cv::rectangle(img, gd_bbox, cv::Scalar(255, 0, 0));
+        cv::imshow("img", img);
+        char key = cv::waitKey(30);
+        if (key == 27) {
+            break;
+        }
+        frame_count++;
+    }
+    output_file.close();
+
+    return 0;
+}
+
+
+#endif
